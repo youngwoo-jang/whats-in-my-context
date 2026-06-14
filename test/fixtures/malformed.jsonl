@@ -1,0 +1,5 @@
+{"type":"assistant","uuid":"a1","message":{"content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"/x"}}],"usage":{"input_tokens":10,"cache_creation_input_tokens":5,"cache_read_input_tokens":100}}}
+{"type":"user","sourceToolAssistantUUID":"a1","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"some file contents here"}]}}
+{"type":"assistant","uuid":"a2","message":{"content":[{"type":"tool_use",  THIS LINE IS TRUNCATED AND INVALID
+{"type":"user"}
+{"type":"assistant","uuid":"a3"}

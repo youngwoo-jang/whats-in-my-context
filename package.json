@@ -1,0 +1,24 @@
+{
+  "name": "whatsinmycontext",
+  "version": "0.0.1",
+  "description": "Claude Code observability: live status-line tree of per-agent context tokens and noise buckets (Bash/Web/File/Other).",
+  "license": "MIT",
+  "type": "commonjs",
+  "main": "dist/src/parser/index.js",
+  "types": "dist/src/parser/index.d.ts",
+  "bin": {
+    "whatsinmycontext": "dist/src/bin/install.js"
+  },
+  "files": [
+    "dist/src",
+    "DESIGN.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "tsc && node --test dist/test"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "typescript": "^5.4.0"
+  }
+}

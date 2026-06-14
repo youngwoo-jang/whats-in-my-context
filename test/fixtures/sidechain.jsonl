@@ -1,0 +1,4 @@
+{"type":"assistant","uuid":"a1","message":{"role":"assistant","content":[{"type":"tool_use","id":"b1","name":"Bash","input":{"command":"ls"}}],"usage":{"input_tokens":5,"cache_creation_input_tokens":5,"cache_read_input_tokens":90}}}
+{"type":"assistant","uuid":"s1","isSidechain":true,"message":{"role":"assistant","content":[{"type":"tool_use","id":"sb1","name":"Read","input":{"file_path":"/subagent/only/file/should/be/ignored.ts"}}],"usage":{"input_tokens":9000,"cache_creation_input_tokens":9000,"cache_read_input_tokens":9000}}}
+{"type":"user","uuid":"su1","isSidechain":true,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"sb1","content":"subagent file contents that must not be counted into master"}]}}
+{"type":"assistant","uuid":"a2","message":{"role":"assistant","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":10,"cache_creation_input_tokens":10,"cache_read_input_tokens":180}}}
