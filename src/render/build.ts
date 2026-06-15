@@ -96,10 +96,31 @@ export function buildSubagentView(
   };
 }
 
-/** Live running shells → views with elapsed timers (finished/killed shells dropped). */
-export function buildShellViews(shells: ShellRecord[], now: number = Date.now()): ShellView[] {
+/**
+ * A `running` shell is "stale" — no longer assumed live — when it was launched
+ * before the most recent `compact_boundary`. A /compact rewrites the context window
+ * (a session-level boundary), and a shell killed out-of-band (`pkill`, process death)
+ * or lost to a mid-shell session quit never produces a `task-notification` /
+ * `TaskStop`, so it would otherwise be pinned to `running` forever. Treating the
+ * compact boundary as terminal mirrors the staleness guard the subagent path
+ * (`readTasks`) already has. A shell launched *after* the last compact is still live
+ * data; one with no `startedAt` is kept (can't position it relative to the boundary).
+ */
+function isStaleShell(s: ShellRecord, lastCompactAt?: number): boolean {
+  if (typeof lastCompactAt !== "number") return false;
+  if (typeof s.startedAt !== "number") return false;
+  return s.startedAt < lastCompactAt;
+}
+
+/** Live running shells → views with elapsed timers (finished/killed/stale shells dropped). */
+export function buildShellViews(
+  shells: ShellRecord[],
+  now: number = Date.now(),
+  lastCompactAt?: number
+): ShellView[] {
   return shells
     .filter((s) => s.status === "running")
+    .filter((s) => !isStaleShell(s, lastCompactAt))
     .map((s) => ({ id: s.id, status: s.status, command: s.command, ageMs: ageOf(s.startedAt, now) }));
 }
 
@@ -114,7 +135,7 @@ export function buildStatusLine(input: StatusInput, color = false): string {
     if (h.description) handoffByDesc.set(h.description, h);
   }
   const subs = input.tasks.map((t) => buildSubagentView(t, handoffByDesc, now));
-  const shells = buildShellViews(parsed.shells, now);
+  const shells = buildShellViews(parsed.shells, now, parsed.lastCompactAt);
 
   return renderTree(master, subs, shells, input.windowSize, color);
 }

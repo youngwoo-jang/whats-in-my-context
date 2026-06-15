@@ -38,6 +38,43 @@ test("buildShellViews: only running shells, with live elapsed", () => {
   assert.equal(views[0].ageMs, 230_000); // → "3m 50s"
 });
 
+test("buildShellViews: drops running shells launched before the last compact_boundary", () => {
+  const now = 1000_000;
+  const compactAt = now - 100_000;
+  const shells: ShellRecord[] = [
+    // launched before the compact, no terminal event → stale, dropped
+    { id: "b71gyizwc", command: "npx vitest --watch", status: "running", startedAt: compactAt - 50_000 },
+    { id: "be7ken7ie", command: "until-loop", status: "running", startedAt: compactAt - 49_000 },
+    // launched after the compact → still live
+    { id: "bfreshpost", command: "npm run dev", status: "running", startedAt: compactAt + 10_000 },
+    // no startedAt → can't position vs boundary, kept
+    { id: "bnoStart", command: "tail -f log", status: "running" },
+  ];
+  const views = buildShellViews(shells, now, compactAt);
+  assert.deepEqual(
+    views.map((v) => v.id).sort(),
+    ["bfreshpost", "bnoStart"],
+    "only pre-compact running shells are dropped"
+  );
+});
+
+test("buildShellViews: without a compact boundary, nothing is dropped for staleness", () => {
+  const now = 1000_000;
+  const shells: ShellRecord[] = [
+    { id: "b0qw539vz", command: "npm run dev", status: "running", startedAt: now - 999_000 },
+  ];
+  assert.equal(buildShellViews(shells, now, undefined).length, 1);
+});
+
+test("buildStatusLine: hides shells stranded 'running' across a /compact (bug repro)", () => {
+  const fix = path.join(FIX, "shells-stale.jsonl");
+  const now = Date.parse("2026-06-15T04:50:00.000Z");
+  const out = buildStatusLine({ transcriptPath: fix, windowSize: 200000, tasks: [], now });
+  assert.ok(!out.includes("b71gyizwc"), "pre-compact zombie shell hidden");
+  assert.ok(!out.includes("be7ken7ie"), "pre-compact zombie shell hidden");
+  assert.ok(out.includes("bfreshpost"), "post-compact live shell still shown");
+});
+
 test("renderShells: '<id> <status> <command…>  <elapsed>', timer flush-right", () => {
   const long = "for i in $(seq 1 999); do echo a-very-long-command-that-overflows-the-line $i; done";
   const lines = renderShells(

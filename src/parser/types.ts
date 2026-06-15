@@ -48,6 +48,13 @@ export interface ParseResult {
   agentHandoffs: AgentHandoff[];
   /** Background shells reconstructed from the transcript (any status). */
   shells: ShellRecord[];
+  /**
+   * Epoch ms of the most recent `compact_boundary`, or undefined if the session
+   * was never compacted. A /compact rewrites the context window (a session-level
+   * boundary), so a shell launched before it with no terminal event can no longer
+   * be assumed live — see `buildShellViews`.
+   */
+  lastCompactAt?: number;
   entryCount: number;
   skippedLines: number;
 }

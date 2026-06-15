@@ -114,6 +114,7 @@ export function parseTranscript(filePath: string): ParseResult {
     if (e?.type === "system" && e?.subtype === "compact_boundary") boundary = i;
   }
   const active = boundary >= 0 ? entries.slice(boundary) : entries;
+  const lastCompactAt = boundary >= 0 ? entryEpoch(entries[boundary]) : undefined;
 
   const tools: ToolsBreakdown = { total: 0, Bash: 0, Web: 0, File: 0 };
   let conversation = 0;
@@ -206,6 +207,7 @@ export function parseTranscript(filePath: string): ParseResult {
     conversation,
     agentHandoffs,
     shells: parseShells(entries),
+    lastCompactAt,
     entryCount: rawEntries.length,
     skippedLines,
   };

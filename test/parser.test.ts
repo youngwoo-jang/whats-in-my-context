@@ -133,6 +133,14 @@ test("parseTranscript: reconstructs background shells with lifecycle + spawn tim
   assert.equal(byId.get("beelv3a64")?.status, "killed", "TaskStop/KillShell marks killed");
 });
 
+test("parseTranscript: exposes lastCompactAt for the most recent compact_boundary", () => {
+  const withCompact = parseTranscript(path.join(FIX, "shells-stale.jsonl"));
+  assert.equal(withCompact.lastCompactAt, Date.parse("2026-06-15T04:10:00.000Z"));
+
+  const noCompact = parseTranscript(path.join(FIX, "shells.jsonl"));
+  assert.equal(noCompact.lastCompactAt, undefined, "no compact → undefined");
+});
+
 test("missing file: safe empty result, no throw", () => {
   const r = parseTranscript(path.join(FIX, "nope.jsonl"));
   assert.equal(r.totalTokens, 0);
