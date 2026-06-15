@@ -1,6 +1,6 @@
 {
   "name": "whatsinmycontext",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Claude Code observability: live status-line tree of per-agent context tokens and noise buckets (Bash/Web/File/Other).",
   "license": "MIT",
   "repository": {
