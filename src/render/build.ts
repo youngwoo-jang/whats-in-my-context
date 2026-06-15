@@ -1,7 +1,7 @@
 import { parseTranscriptCached } from "./cache";
 import { computeThinking, estimateTokens } from "../parser";
-import { AgentHandoff, ParseResult } from "../parser/types";
-import { MasterView, SubagentView, renderTree } from "./format";
+import { AgentHandoff, ParseResult, ShellRecord } from "../parser/types";
+import { MasterView, ShellView, SubagentView, renderTree } from "./format";
 import { SubagentTask, readTasks } from "./dump";
 
 const HANDOFF_CAP = 200;
@@ -14,6 +14,7 @@ const EMPTY: ParseResult = {
   tools: { total: 0, Bash: 0, Web: 0, File: 0 },
   conversation: 0,
   agentHandoffs: [],
+  shells: [],
   entryCount: 0,
   skippedLines: 0,
 };
@@ -24,6 +25,15 @@ export interface StatusInput {
   /** master total from statusLine `context_window.current_usage` (authoritative). */
   masterTotal?: { tokens: number; exact: boolean };
   tasks: SubagentTask[];
+  /** "now" for elapsed timers; defaults to Date.now() (injectable for tests). */
+  now?: number;
+}
+
+/** ms elapsed since `startedAt`, or undefined if the spawn time is unknown/in the future. */
+function ageOf(startedAt: number | undefined, now: number): number | undefined {
+  if (typeof startedAt !== "number" || !Number.isFinite(startedAt)) return undefined;
+  const age = now - startedAt;
+  return age >= 0 ? age : undefined;
 }
 
 function buildMasterView(parsed: ParseResult, masterTotal?: { tokens: number; exact: boolean }): MasterView {
@@ -47,7 +57,11 @@ function capHandoff(text: string): string {
   return t.length > HANDOFF_CAP ? t.slice(0, HANDOFF_CAP) + "…" : t;
 }
 
-export function buildSubagentView(t: SubagentTask, handoffByDesc: Map<string, AgentHandoff>): SubagentView {
+export function buildSubagentView(
+  t: SubagentTask,
+  handoffByDesc: Map<string, AgentHandoff>,
+  now: number = Date.now()
+): SubagentView {
   const description = (t.description || "").trim();
   const match = description ? handoffByDesc.get(description) : undefined;
 
@@ -68,27 +82,41 @@ export function buildSubagentView(t: SubagentTask, handoffByDesc: Map<string, Ag
     : [];
   const total = Math.max(t.tokenCount || 0, ...(samples.length ? samples : [0]));
 
+  // Spawn time: the matched master `Agent` tool_use timestamp (reliable, from the
+  // transcript), falling back to the harness task's own startTime if present.
+  const ageMs = ageOf(match?.startedAt ?? t.startTime, now);
+
   return {
     type,
     description,
     totalTokens: total,
     totalKnown: total > 0,
     handoff,
+    ageMs,
   };
+}
+
+/** Live running shells → views with elapsed timers (finished/killed shells dropped). */
+export function buildShellViews(shells: ShellRecord[], now: number = Date.now()): ShellView[] {
+  return shells
+    .filter((s) => s.status === "running")
+    .map((s) => ({ id: s.id, status: s.status, command: s.command, ageMs: ageOf(s.startedAt, now) }));
 }
 
 /** Assemble the whole tree string from a normalized status input. */
 export function buildStatusLine(input: StatusInput, color = false): string {
   const parsed = input.transcriptPath ? parseTranscriptCached(input.transcriptPath) : EMPTY;
   const master = buildMasterView(parsed, input.masterTotal);
+  const now = input.now ?? Date.now();
 
   const handoffByDesc = new Map<string, AgentHandoff>();
   for (const h of parsed.agentHandoffs) {
     if (h.description) handoffByDesc.set(h.description, h);
   }
-  const subs = input.tasks.map((t) => buildSubagentView(t, handoffByDesc));
+  const subs = input.tasks.map((t) => buildSubagentView(t, handoffByDesc, now));
+  const shells = buildShellViews(parsed.shells, now);
 
-  return renderTree(master, subs, input.windowSize, color);
+  return renderTree(master, subs, shells, input.windowSize, color);
 }
 
 /** Full render directly from the parsed statusLine stdin object. */

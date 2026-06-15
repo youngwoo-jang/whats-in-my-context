@@ -117,6 +117,22 @@ test("compact limbo: no usage after the boundary → total is estimated, non-exa
   assert.ok(r.totalTokens > 100, "estimate exceeds the stale pre-compact total");
 });
 
+test("parseTranscript: reconstructs background shells with lifecycle + spawn time", () => {
+  const r = parseTranscript(path.join(FIX, "shells.jsonl"));
+  const byId = new Map(r.shells.map((s) => [s.id, s]));
+
+  // Three real launches; the echoed "bSPOOF99" text (unknown tool_use_id) is ignored.
+  assert.equal(r.shells.length, 3);
+  assert.ok(!byId.has("bSPOOF99"), "echoed launch text does not spoof a shell");
+
+  assert.equal(byId.get("b0qw539vz")?.command, "npm run dev");
+  assert.equal(byId.get("b0qw539vz")?.status, "running");
+  assert.equal(byId.get("b0qw539vz")?.startedAt, Date.parse("2026-06-15T04:00:01.000Z"));
+
+  assert.equal(byId.get("bdonewz9q")?.status, "completed", "task-notification flips status");
+  assert.equal(byId.get("beelv3a64")?.status, "killed", "TaskStop/KillShell marks killed");
+});
+
 test("missing file: safe empty result, no throw", () => {
   const r = parseTranscript(path.join(FIX, "nope.jsonl"));
   assert.equal(r.totalTokens, 0);
@@ -126,4 +142,5 @@ test("missing file: safe empty result, no throw", () => {
   assert.deepEqual(r.tools, { total: 0, Bash: 0, Web: 0, File: 0 });
   assert.equal(r.conversation, 0);
   assert.deepEqual(r.agentHandoffs, []);
+  assert.deepEqual(r.shells, []);
 });

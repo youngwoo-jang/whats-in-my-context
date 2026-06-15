@@ -2,11 +2,77 @@ import { readJsonl } from "./jsonl";
 import { computeUsageBounds } from "./total";
 import { estimateTokens } from "./tokens";
 import { laneForTool } from "./buckets";
-import { AgentHandoff, ParseResult, ToolsBreakdown } from "./types";
+import { AgentHandoff, ParseResult, ShellRecord, ToolsBreakdown } from "./types";
 
 export { estimateTokens } from "./tokens";
 export { laneForTool } from "./buckets";
 export * from "./types";
+
+/** Parse an entry's ISO `timestamp` into epoch ms, or undefined if absent/invalid. */
+function entryEpoch(e: any): number | undefined {
+  const t = e?.timestamp ? Date.parse(e.timestamp) : NaN;
+  return Number.isFinite(t) ? t : undefined;
+}
+
+// A background-shell launch tool_result echoes its id and output path, e.g.
+// "Command running in background with ID: b0qw539vz. Output is being written to: …".
+const SHELL_START_RE = /running in background with ID:\s*(\S+?)\.\s+Output is being written to:/;
+
+/**
+ * Reconstruct background shells from the transcript. A shell is a `Bash` tool_use
+ * with run_in_background:true; its id + spawn time come from the
+ * matching launch tool_result, and its status is updated by the completion
+ * notification (task-notification attachment / queue-operation) or a kill.
+ *
+ * Runs over the whole (non-sidechain) file, not just the active post-compact segment,
+ * because a shell can outlive a /compact and still be running.
+ */
+function parseShells(entries: any[]): ShellRecord[] {
+  // run_in_background Bash launches, keyed by tool_use id → command.
+  const cmdByToolUseId = new Map<string, string>();
+  const shells = new Map<string, ShellRecord>();
+
+  for (const e of entries) {
+    const content = e?.message?.content;
+
+    if (e?.type === "assistant" && Array.isArray(content)) {
+      for (const b of content) {
+        if (b?.type !== "tool_use") continue;
+        if (b.name === "Bash" && b.input?.run_in_background === true && b.id) {
+          cmdByToolUseId.set(b.id, String(b.input.command ?? ""));
+        } else if (b.name === "KillShell" || b.name === "TaskStop") {
+          // KillShell was renamed TaskStop; it carries shell_id (deprecated) or task_id.
+          const id = b.input?.shell_id || b.input?.task_id;
+          const s = id && shells.get(id);
+          if (s) s.status = "killed";
+        }
+      }
+    } else if (e?.type === "user" && Array.isArray(content)) {
+      for (const b of content) {
+        if (b?.type !== "tool_result") continue;
+        // Only a result whose tool_use_id is a known background launch is a real
+        // shell start. This ignores transcripts that merely *echo* the launch text
+        // (e.g. someone cat-ing the output) — those carry an unrelated tool_use_id.
+        const command = cmdByToolUseId.get(b.tool_use_id);
+        if (command === undefined) continue;
+        const m = SHELL_START_RE.exec(resultTextOf(b.content));
+        if (m) shells.set(m[1], { id: m[1], command, status: "running", startedAt: entryEpoch(e) });
+      }
+    } else if (e?.type === "attachment" || e?.type === "queue-operation") {
+      // Completion/status arrives as a task-notification attachment or queue-operation;
+      // both embed <task-id>/<status>. (These are structured harness entries, never a
+      // tool_result, so matching their text here can't be spoofed by echoed output.)
+      const text = JSON.stringify(e ?? "");
+      if (!text.includes("task-notification")) continue;
+      const id = (/<task-id>(.*?)<\/task-id>/.exec(text) || [])[1];
+      const st = (/<status>(.*?)<\/status>/.exec(text) || [])[1];
+      const s = id && shells.get(id);
+      if (s && st) s.status = st;
+    }
+  }
+
+  return [...shells.values()];
+}
 
 /** Flatten a tool_result `content` field (string | block[]) into plain text. */
 function resultTextOf(content: any): string {
@@ -91,6 +157,7 @@ export function parseTranscript(filePath: string): ParseResult {
               description: String(b.input.description ?? ""),
               prompt: String(b.input.prompt ?? ""),
               subagentType: String(b.input.subagent_type ?? ""),
+              startedAt: entryEpoch(e),
             });
           }
         }
@@ -138,6 +205,7 @@ export function parseTranscript(filePath: string): ParseResult {
     tools,
     conversation,
     agentHandoffs,
+    shells: parseShells(entries),
     entryCount: rawEntries.length,
     skippedLines,
   };

@@ -24,7 +24,7 @@ export function parseTranscriptCached(file: string): ParseResult {
   }
   // CACHE_VERSION guards against schema drift (e.g. a new bucket) — bump it when
   // ParseResult's shape changes so stale-shaped caches are ignored.
-  const key = `v6:${stat.mtimeMs}:${stat.size}`;
+  const key = `v7:${stat.mtimeMs}:${stat.size}`;
   const cp = cachePath(file);
   try {
     const cached = JSON.parse(fs.readFileSync(cp, "utf8"));

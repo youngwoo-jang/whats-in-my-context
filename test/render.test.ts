@@ -1,9 +1,10 @@
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as path from "path";
-import { formatTokens, loadPercent, renderMaster, renderSubagent, MasterView, BLOCK_SEP } from "../src/render/format";
-import { buildSubagentView, buildStatusLine } from "../src/render/build";
+import { formatTokens, formatDuration, loadPercent, renderMaster, renderSubagent, renderShells, MasterView, BLOCK_SEP } from "../src/render/format";
+import { buildSubagentView, buildShellViews, buildStatusLine } from "../src/render/build";
 import { estimateTokens } from "../src/parser";
+import { ShellRecord } from "../src/parser/types";
 
 const FIX = path.join(__dirname, "..", "..", "test", "fixtures");
 const sample = path.join(FIX, "sample-session.jsonl");
@@ -14,6 +15,46 @@ test("formatTokens: compact k, one decimal", () => {
   assert.equal(formatTokens(142000), "142.0k");
   assert.equal(formatTokens(500), "0.5k");
   assert.equal(formatTokens(undefined as any), "0.0k"); // defensive
+});
+
+test("formatDuration: h/m/s, higher units drop off, clamps negatives", () => {
+  assert.equal(formatDuration(50 * 1000), "50s");
+  assert.equal(formatDuration((3 * 60 + 50) * 1000), "3m 50s");
+  assert.equal(formatDuration((3600 + 3 * 60 + 50) * 1000), "1h 3m 50s");
+  assert.equal(formatDuration(-5000), "0s");
+  assert.equal(formatDuration(NaN), "0s");
+});
+
+test("buildShellViews: only running shells, with live elapsed", () => {
+  const now = 1000_000;
+  const shells: ShellRecord[] = [
+    { id: "b0qw539vz", command: "npm run dev", status: "running", startedAt: now - 230_000 },
+    { id: "bdonewz9q", command: "sleep 2", status: "completed", startedAt: now - 5000 },
+    { id: "beelv3a64", command: "x", status: "killed", startedAt: now - 9000 },
+  ];
+  const views = buildShellViews(shells, now);
+  assert.equal(views.length, 1, "completed/killed dropped");
+  assert.equal(views[0].id, "b0qw539vz");
+  assert.equal(views[0].ageMs, 230_000); // → "3m 50s"
+});
+
+test("renderShells: '<id> <status> <command…>  <elapsed>', timer flush-right", () => {
+  const long = "for i in $(seq 1 999); do echo a-very-long-command-that-overflows-the-line $i; done";
+  const lines = renderShells(
+    [
+      { id: "b0qw539vz", status: "running", command: "npm run dev", ageMs: 230_000 },
+      { id: "beelv3a64", status: "running", command: long, ageMs: 9000 },
+    ],
+    false
+  );
+  assert.equal(lines.length, 2);
+  assert.ok(lines[0].startsWith("b0qw539vz running npm run dev"), "id status command");
+  assert.ok(lines[0].endsWith("3m 50s"), "elapsed at the right end");
+  assert.equal(lines[0].length, 80, "timer right-aligned to wrap width");
+  assert.ok(lines[1].startsWith("beelv3a64 running "));
+  assert.ok(lines[1].includes("…"), "long command truncated");
+  assert.ok(lines[1].endsWith("9s"), "elapsed still at the right end");
+  assert.equal(lines[1].length, 80, "stays within wrap width");
 });
 
 test("loadPercent: rounded % of window, null when unknown", () => {
@@ -81,6 +122,23 @@ test("buildSubagentView: no count anywhere → totalKnown false (renders '—')"
   assert.ok(!line.includes("%"), "no fill % when count unknown");
 });
 
+test("buildSubagentView: elapsed from matched Agent spawn time, rendered live", () => {
+  const now = 5_000_000;
+  const map = new Map([
+    ["find auth", { description: "find auth", prompt: HANDOFF, subagentType: "Explore", startedAt: now - 110_000 }],
+  ]);
+  const v = buildSubagentView({ type: "local_agent", description: "find auth", tokenCount: 9000 }, map, now);
+  assert.equal(v.ageMs, 110_000); // → "1m 50s"
+  const head = renderSubagent(v, 1000000, false)[0];
+  assert.ok(head.endsWith("1m 50s"), "elapsed appended to subagent header");
+});
+
+test("buildSubagentView: no spawn time anywhere → no elapsed", () => {
+  const v = buildSubagentView({ type: "Explore", description: "x", tokenCount: 9000 }, new Map(), 1000);
+  assert.equal(v.ageMs, undefined);
+  assert.ok(!/\d+s$/.test(renderSubagent(v, 1000000, false)[0]), "no trailing timer");
+});
+
 test("buildSubagentView: no match → no handoff (description still in header)", () => {
   const v = buildSubagentView(
     { type: "general-purpose", description: "refactor utils", tokenCount: 12000 },
@@ -123,4 +181,16 @@ test("buildStatusLine: master-only when no tasks", () => {
   const out = buildStatusLine({ transcriptPath: sample, windowSize: 200000, tasks: [] });
   assert.equal(out.split(BLOCK_SEP).length, 1, "no subagent block");
   assert.match(out, /^master/m);
+});
+
+test("buildStatusLine: appends a live-shells block below the subagents", () => {
+  const shellsFix = path.join(FIX, "shells.jsonl");
+  const now = Date.parse("2026-06-15T04:00:01.000Z") + 230_000; // 3m 50s after b0qw539vz launch
+  const out = buildStatusLine({ transcriptPath: shellsFix, windowSize: 200000, tasks: [], now });
+  const blocks = out.split(BLOCK_SEP);
+  assert.equal(blocks.length, 2, "master block + shells block");
+  assert.match(out, /^b0qw539vz running npm run dev\s+3m 50s$/m, "running shell, timer flush-right");
+  assert.ok(!out.includes("bdonewz9q"), "completed shell hidden");
+  assert.ok(!out.includes("beelv3a64"), "killed shell hidden");
+  assert.ok(!out.includes("bSPOOF99"), "echoed launch text not shown");
 });

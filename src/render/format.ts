@@ -18,10 +18,24 @@ export interface SubagentView {
   totalKnown: boolean;
   /** capped (≤200 char) handoff text + the handoff's token size. */
   handoff?: { text: string; tokens: number };
+  /** ms since spawn, rendered as a live "1h 3m 50s" elapsed; omitted if unknown. */
+  ageMs?: number;
+}
+
+/** A live background shell row: colored id, status, elapsed since spawn, command. */
+export interface ShellView {
+  id: string;
+  status: string;
+  command: string;
+  /** ms since spawn, rendered as a live "1h 3m 50s" elapsed; omitted if unknown. */
+  ageMs?: number;
 }
 
 /** Width the handoff quote is word-wrapped to (statusLine §4). */
 export const WRAP_WIDTH = 80;
+
+/** Minimum gap before a flush-right elapsed timer, so it never crowds the text. */
+const TIMER_GAP = 3;
 
 export const WARN_RATIO = 0.4;
 export const DANGER_RATIO = 0.6;
@@ -41,6 +55,20 @@ function dim(s: string, color: boolean): string {
 export function formatTokens(n: number): string {
   const v = Number.isFinite(n) ? n : 0;
   return (v / 1000).toFixed(1) + "k";
+}
+
+/**
+ * Elapsed time as "1h 3m 50s" / "3m 50s" / "50s" (matching Claude Code's task timers).
+ * Higher units drop off once zero; negative/NaN clamps to "0s".
+ */
+export function formatDuration(ms: number): string {
+  const total = Number.isFinite(ms) ? Math.max(0, Math.floor(ms / 1000)) : 0;
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h) return `${h}h ${m}m ${s}s`;
+  if (m) return `${m}m ${s}s`;
+  return `${s}s`;
 }
 
 /** Context fill as a whole-number percent of the window, or null if unknown. */
@@ -70,7 +98,9 @@ function loadTag(total: number, windowSize: number, color: boolean, bar = false)
   return "  " + (c ? c + body + RESET : body);
 }
 
-const VALUE_COL = 40;
+// Column where the master's component values end (right-aligned). Smaller = the
+// value sits closer to its label; must stay above the longest label + value + gap.
+const VALUE_COL = 32;
 
 function row(label: string, value: string): string {
   // Min 3 spaces so an overflowing (long) label never crowds its value.
@@ -92,6 +122,12 @@ function header(label: string, total: string, tag: string, nameColor = ""): stri
 //  2. box-drawing and ▸ · are East-Asian "Ambiguous width" (1 col in Latin
 //     terminals, 2 in CJK), which breaks column alignment — ASCII stays width-1.
 const BULLET = "- ";
+
+/** Collapse whitespace and cap to `width` chars with a trailing ellipsis. */
+function capLine(text: string, width: number): string {
+  const t = (text || "").replace(/\s+/g, " ").trim();
+  return t.length > width ? t.slice(0, Math.max(1, width - 1)) + "…" : t;
+}
 
 /** Render the master block: header + System/Thinking/Tools/Conversation. */
 export function renderMaster(v: MasterView, windowSize: number, color = false): string[] {
@@ -131,14 +167,27 @@ function wrapWords(text: string, width: number): string[] {
  * colored), then the handoff quote word-wrapped to WRAP_WIDTH, then a
  * `- handoff <size>` row. No `>` marker (DESIGN.md §4).
  */
-export function renderSubagent(v: SubagentView, windowSize: number, color = false): string[] {
-  // No harness count → show "—" (not a misleading "0.0k") and no fill %.
-  const tag = v.totalKnown ? loadTag(v.totalTokens, windowSize, color) : "";
+export function renderSubagent(v: SubagentView, _windowSize: number, color = false): string[] {
+  // Subagents do NOT align their tokens to the master's component column, and show no
+  // fill %. The right cluster — token count + elapsed timer — is grouped and
+  // flush-right at WRAP_WIDTH, with the `<type> · <description>` label on the left.
+  // No harness count → "—" (not a misleading "0.0k").
   const total = v.totalKnown ? formatTokens(v.totalTokens) : "—";
+  const sep = " ".repeat(TIMER_GAP);
+  const agePlain = v.ageMs != null ? sep + formatDuration(v.ageMs) : "";
+  const clusterPlain = total + agePlain;
+
   const label = v.description ? `${v.type} · ${v.description}` : v.type;
-  const plain = row(label, total);
-  // Color only the type (first v.type.length chars); padding from the plain label.
-  const head = color ? TEAL + v.type + RESET + plain.slice(v.type.length) + tag : plain + tag;
+  const pad = " ".repeat(Math.max(TIMER_GAP, WRAP_WIDTH - label.length - clusterPlain.length));
+
+  let head: string;
+  if (!color) {
+    head = label + pad + clusterPlain;
+  } else {
+    const ageColored = v.ageMs != null ? sep + DIM + formatDuration(v.ageMs) + RESET : "";
+    const labelColored = TEAL + v.type + RESET + label.slice(v.type.length);
+    head = labelColored + pad + total + ageColored;
+  }
 
   const lines = [head];
   const h = v.handoff;
@@ -155,18 +204,39 @@ export function renderSubagent(v: SubagentView, windowSize: number, color = fals
   return lines;
 }
 
+/**
+ * Render the background-shells block: one line per shell,
+ * `<id> <status> <command…>      <elapsed>` — the id colored, the command truncated
+ * to leave room, and the elapsed timer flush-right at WRAP_WIDTH (a tidy timer column).
+ */
+export function renderShells(shells: ShellView[], color = false): string[] {
+  return shells.map((s) => {
+    const age = s.ageMs != null ? formatDuration(s.ageMs) : "";
+    const prefix = `${s.id} ${s.status} `;
+    const cmd = capLine(s.command, Math.max(12, WRAP_WIDTH - prefix.length - (age ? age.length + TIMER_GAP : 0)));
+    const left = prefix + cmd;
+    // ≥TIMER_GAP space gap, then the timer right-aligned to WRAP_WIDTH.
+    const pad = age ? " ".repeat(Math.max(TIMER_GAP, WRAP_WIDTH - left.length - age.length)) : "";
+    if (!color) return left + pad + age;
+    const timer = age ? DIM + age + RESET : "";
+    return TEAL + s.id + RESET + left.slice(s.id.length) + pad + timer;
+  });
+}
+
 // Block separator. statusLine drops blank/whitespace-only lines, so a real empty
 // line collapses; a lone zero-width space survives trimming yet renders blank.
 export const BLOCK_SEP = "\n​\n";
 
-/** Render the full tree: master block, blank line, then each subagent block. */
+/** Render the full tree: master block, then each subagent block, then live shells. */
 export function renderTree(
   master: MasterView,
   subagents: SubagentView[],
+  shells: ShellView[],
   windowSize: number,
   color = false
 ): string {
   const blocks = [renderMaster(master, windowSize, color).join("\n")];
   for (const s of subagents) blocks.push(renderSubagent(s, windowSize, color).join("\n"));
+  if (shells.length) blocks.push(renderShells(shells, color).join("\n"));
   return blocks.join(BLOCK_SEP);
 }
