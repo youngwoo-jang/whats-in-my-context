@@ -106,7 +106,7 @@ test("buildShellViews: a live shell is kept even if launched before the last /co
   assert.equal(buildShellViews(shells, now, compactAt, allUnknown).length, 0, "fallback still drops it");
 });
 
-test("renderShells: 'shell <status> <command…>  <elapsed>', timer flush-right", () => {
+test("renderShells: left-rail '<glyph> shell <status> <command…>  <elapsed>', timer flush-right", () => {
   const long = "for i in $(seq 1 999); do echo a-very-long-command-that-overflows-the-line $i; done";
   const lines = renderShells(
     [
@@ -116,13 +116,24 @@ test("renderShells: 'shell <status> <command…>  <elapsed>', timer flush-right"
     false
   );
   assert.equal(lines.length, 2);
-  assert.ok(lines[0].startsWith("shell running npm run dev"), "label status command");
+  assert.ok(lines[0].startsWith("┌ shell running npm run dev"), "first shell → ┌ rail glyph");
   assert.ok(lines[0].endsWith("3m 50s"), "elapsed at the right end");
   assert.equal(lines[0].length, 80, "timer right-aligned to wrap width");
-  assert.ok(lines[1].startsWith("shell running "));
+  assert.ok(lines[1].startsWith("└ shell running "), "last shell → └ rail glyph");
   assert.ok(lines[1].includes("…"), "long command truncated");
   assert.ok(lines[1].endsWith("9s"), "elapsed still at the right end");
   assert.equal(lines[1].length, 80, "stays within wrap width");
+});
+
+test("renderShells: rail glyphs ┌ │ … └ across a group; a lone shell uses └", () => {
+  const mk = (n: number) =>
+    renderShells(
+      Array.from({ length: n }, (_, i) => ({ id: `b${i}`, status: "running", command: `cmd ${i}`, ageMs: 1000 })),
+      false
+    ).map((l) => l[0]);
+  assert.deepEqual(mk(1), ["└"], "lone shell closes the rail");
+  assert.deepEqual(mk(3), ["┌", "│", "└"], "first ┌, middle │, last └");
+  assert.equal(renderShells([], false).length, 0, "no shells → no lines");
 });
 
 test("loadPercent: rounded % of window, null when unknown", () => {
@@ -201,6 +212,67 @@ test("buildSubagentView: elapsed from matched Agent spawn time, rendered live", 
   assert.ok(head.endsWith("1m 50s"), "elapsed appended to subagent header");
 });
 
+test("buildSubagentView: live token total overrides the harness's 0; agentType from meta", () => {
+  // The harness reports tokenCount 0 (+ zero samples) for a running subagent; the real
+  // total comes from its own transcript's last usage, and the real type from its meta.
+  const v = buildSubagentView(
+    { id: "t1", type: "local_agent", description: "x", tokenCount: 0, tokenSamples: [0, 0, 0] },
+    new Map(),
+    1000,
+    { tokens: 81677, agentType: "general-purpose" }
+  );
+  assert.equal(v.totalTokens, 81677);
+  assert.equal(v.totalKnown, true);
+  assert.equal(v.type, "general-purpose"); // meta wins over "local_agent"
+});
+
+test("buildSubagentView: idle from transcript mtime; lastActivity + dotPhase passed through", () => {
+  const now = 1_000_000;
+  const v = buildSubagentView(
+    { id: "t1", type: "local_agent", description: "x", tokenCount: 0 },
+    new Map(),
+    now,
+    { tokens: 5000, mtimeMs: now - 4000, lastActivity: "Edit src/a.ts" },
+    2
+  );
+  assert.equal(v.idleMs, 4000);
+  assert.equal(v.lastActivity, "Edit src/a.ts");
+  assert.equal(v.dotPhase, 2);
+});
+
+test("renderSubagent: live '> activity' line — dots padded to 3 cols, idle flush-right", () => {
+  const base = { type: "general-purpose", description: "fix bug", totalTokens: 81677, totalKnown: true } as const;
+  const line1 = renderSubagent({ ...base, lastActivity: "Edit src/a.ts", idleMs: 2000, dotPhase: 0 }, 200000, false);
+  const activity = line1[line1.length - 1];
+  assert.ok(activity.startsWith("> Edit src/a.ts"), "prompt-style marker + activity");
+  assert.ok(activity.includes("."), "at least one trailing dot");
+  assert.ok(activity.endsWith("idle 2s"), "idle flush-right");
+  assert.equal(activity.length, 80, "right-aligned to wrap width");
+
+  // Dot count tracks phase but the idle column stays put (dots padded to 3 cols).
+  const at = (phase: number) =>
+    renderSubagent({ ...base, lastActivity: "Edit src/a.ts", idleMs: 2000, dotPhase: phase }, 200000, false).pop()!;
+  assert.equal(at(0).length, at(1).length, "phase change doesn't shift width");
+  assert.equal(at(1).length, at(2).length);
+  assert.ok(at(2).includes("..."), "phase 2 → 3 dots");
+});
+
+test("renderSubagent: no lastActivity → no live line (header + handoff only)", () => {
+  const lines = renderSubagent({ type: "Explore", description: "x", totalTokens: 9000, totalKnown: true }, 200000, false);
+  assert.ok(!lines.some((l) => l.startsWith("> ")), "no '>' activity line");
+});
+
+test("renderSubagent: activity line is quietly dim — no teal marker, no idle threshold colors", () => {
+  const mk = (idleMs: number) =>
+    renderSubagent({ type: "x", description: "d", totalTokens: 1, totalKnown: true, lastActivity: "Bash npm test", idleMs }, 200000, true).pop()!;
+  for (const idle of [2000, 200_000]) {
+    const line = mk(idle);
+    assert.ok(line.includes("\x1b[2m"), "the line is dim");
+    assert.ok(!line.includes("\x1b[38;5;37m"), "no teal marker");
+    assert.ok(!line.includes("\x1b[33m") && !line.includes("\x1b[1;31m"), "no yellow/red idle regardless of duration");
+  }
+});
+
 test("buildSubagentView: no spawn time anywhere → no elapsed", () => {
   const v = buildSubagentView({ type: "Explore", description: "x", tokenCount: 9000 }, new Map(), 1000);
   assert.equal(v.ageMs, undefined);
@@ -251,16 +323,45 @@ test("buildStatusLine: master-only when no tasks", () => {
   assert.match(out, /^master/m);
 });
 
-test("buildStatusLine: appends a live-shells block below the subagents", () => {
+test("buildStatusLine: master's own shells render as a rail at the foot of the master block", () => {
   const shellsFix = path.join(FIX, "shells.jsonl");
   const now = Date.parse("2026-06-15T04:00:01.000Z") + 230_000; // 3m 50s after b0qw539vz launch
   // The fixture's output paths don't exist on disk; keep liveness undecidable so the
   // transcript-derived status (running/completed/killed) is what's exercised here.
   const out = buildStatusLine({ transcriptPath: shellsFix, windowSize: 200000, tasks: [], now, isAlive: allUnknown });
   const blocks = out.split(BLOCK_SEP);
-  assert.equal(blocks.length, 2, "master block + shells block");
-  assert.match(out, /^shell running npm run dev\s+3m 50s$/m, "running shell, timer flush-right");
+  assert.equal(blocks.length, 1, "shells nest inside the master block, not a separate block");
+  // Two live shells in the fixture → npm run dev is first (┌), timer flush-right.
+  assert.match(out, /^┌ shell running npm run dev\s+3m 50s$/m, "first running shell on the rail, timer flush-right");
+  assert.match(out, /^└ shell running npx vitest run/m, "last running shell closes the rail");
   assert.ok(!out.includes("sleep 2"), "completed shell hidden");
   assert.ok(!out.includes("for i in 1 2 3"), "killed shell hidden");
   assert.ok(!out.includes("bSPOOF99"), "echoed launch text not shown");
+});
+
+test("buildStatusLine: a subagent's own shells render as a rail inside its block", () => {
+  // The subagent launches background shells in ITS transcript; inject the per-task lookup
+  // (the default reads the subagent transcript from disk) to exercise the wiring + nesting.
+  const out = buildStatusLine({
+    transcriptPath: sample,
+    windowSize: 200000,
+    masterTotal: { tokens: 500, exact: true },
+    tasks: [{ id: "t1", type: "local_agent", description: "find auth", status: "running", tokenCount: 95000 }],
+    subagentShells: (id) =>
+      id === "t1"
+        ? [
+            { id: "bbaseln", status: "running", command: "until grep -q 'Test Files' /tmp/red.log; do :; done", ageMs: 64_000 },
+            { id: "bpkill", status: "running", command: "pkill -f '[v]itest'; sleep 2", ageMs: 62_000 },
+          ]
+        : [],
+  });
+  const blocks = out.split(BLOCK_SEP);
+  assert.equal(blocks.length, 2, "master block + the subagent block (shells nest in the latter)");
+  const subBlock = blocks[1];
+  assert.match(subBlock, /^subagent · find auth/m);
+  // Two shells → ┌ first, └ last, both inside the subagent block.
+  assert.match(subBlock, /^┌ shell running until grep/m, "first subagent shell on the rail");
+  assert.match(subBlock, /^└ shell running pkill -f/m, "last subagent shell closes the rail");
+  // The shells belong to the subagent, not the master block.
+  assert.ok(!/^[┌│└] shell/m.test(blocks[0]), "no shell rail in the master block");
 });

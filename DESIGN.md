@@ -80,16 +80,38 @@ three fold into the Tools total without their own sub-entry.
 
 ## 3. Subagents
 
-A subagent row shows only **total** and **handoff** — its internal component breakdown
-is not derivable from official data:
+A subagent row shows **total**, **handoff**, and a live **activity** line. Its internal
+component breakdown is not derivable, but its own transcript supplies the rest.
 
-- **total** = the task's `tokenCount`.
-- **type** = the real agent type from the matched `Agent` `tool_use.input.subagent_type`
-  (subagentStatusLine only reports a generic `local_agent`); falls back to the task's type.
+The `subagentStatusLine` stdin is nearly useless for a *running* agent: it reports
+`tokenCount: 0` (and an all-zero `tokenSamples`) and a generic `local_agent` type for the
+**entire run**, and nothing in the payload changes tick-to-tick except the clock. So the
+real signals come from the per-subagent transcript the harness writes beside the master at
+`<master-dir>/<session>/subagents/agent-<taskId>.jsonl` (+ an `agent-<taskId>.meta.json`
+sidecar). The path is derived deterministically from the master `transcript_path` and the
+task `id`; only the **tail** (~64 KiB) of the jsonl is read per tick.
+
+- **total** = the subagent's **last assistant `usage`** (input + cache_creation +
+  cache_read), exactly as the master total is computed. Falls back to the task's
+  `tokenCount` / max `tokenSample`; if all are 0, total is unknown (rendered `—`). This is
+  what fixes the long-standing `—` on running subagents.
+- **type** = the real `agentType` from `meta.json`; then the matched `Agent`
+  `tool_use.input.subagent_type`; then the task's own type (`local_agent`).
 - **description** = the task's `description`.
 - **handoff** = the master's `Agent` `tool_use.input.prompt`, matched to the task by
   `description`, capped at **200 characters** with a trailing `…`. Shown only when a
   match exists.
+- **activity** = the subagent's **last meaningful content block** (assistant text, or a
+  `tool_use` rendered `<name> <primary-arg>`, or `(thinking)`), one line, from the tail.
+- **idle** = `now − jsonl mtime`: how long since the subagent last wrote anything. This is
+  the liveness/hang signal — a deadlocked agent still *exists* but stops writing.
+
+**The pulse (Running… dots).** A status-line script is invoked once per render and exits,
+so it can't animate between renders. Instead the activity line's trailing dots advance one
+step (`. → .. → …`, padded to a fixed 3 columns so the idle column never jitters) **only on
+renders where the transcript mtime grew**, and freeze otherwise. The dots are therefore a
+*true* liveness cue — they move iff the agent moved — not a fake spinner. State (last mtime
++ phase per task) is persisted to a tmp pulse file, keyed by session, pruned after 60 s.
 
 ---
 
@@ -97,12 +119,18 @@ is not derivable from official data:
 
 Component order: **System → Thinking → Tools → Conversation**.
 
-- Glyphs are **width-1 ASCII only**. Two constraints force this: statusLine strips
-  each line's leading whitespace (so indentation must be a visible character, not
-  spaces) and drops blank lines (so blocks are separated by a zero-width-space line),
-  and box-drawing / `▸` / `·` are East-Asian "Ambiguous width" (1 column in Latin
-  terminals, 2 in CJK), which would break column alignment. Component/handoff rows are
-  prefixed `- `; the handoff quote line starts with `"`.
+- Glyphs are **width-1 ASCII** for everything whose column alignment matters. Two
+  constraints force this: statusLine strips each line's leading whitespace (so
+  indentation must be a visible character, not spaces) and drops blank lines (so blocks
+  are separated by a zero-width-space line), and box-drawing / `▸` / `·` are East-Asian
+  "Ambiguous width" (1 column in Latin terminals, 2 in CJK), which would break column
+  alignment. Component/handoff rows are prefixed `- `; the handoff quote line starts `"`.
+  - **Exception — the shell rail.** Background shells render as a left-rail group whose
+    glyph marks position: `┌` first, `│` middle, `└` last (a lone shell uses `└`). These
+    box-drawing glyphs are LEADING (no indentation — the glyph itself is the left edge,
+    surviving the leading-whitespace strip) and the timer is flush-right, so any CJK
+    width drift is confined to the left of the text and never compounds. This is a
+    deliberate tradeoff for the "contained group" look; Latin terminals are exact.
 - Each agent header is `<name>` (master) or `<type> · <description>` (subagent), then
   the total, then the fill %. **Only the name/type is colored** — master **orange**,
   subagents **teal** — leaving the rest plain. (Color is applied without affecting the
@@ -116,6 +144,19 @@ Component order: **System → Thinking → Tools → Conversation**.
   `context_window.context_window_size`; subagents assume the session window.
 - The handoff quote is dim and **word-wrapped to 80 columns** (the 200-char cap yields
   up to ~3 lines); the handoff's token size is appended at the end of the quote.
+- Below the handoff, the live **activity line**: `> <last activity><dots>   idle Ns`. The
+  `>` reads like a console prompt; the text is hard-truncated (no `…` — the dots imply
+  more); the trailing dots are the pulse (§3); `idle Ns` is flush-right at 80 columns. The
+  **whole line is uniformly dim** — no marker color, no idle threshold color — so it stays
+  quiet beneath the headers (the idle *number* is the hang cue, not a color). Shown only
+  when an activity line exists.
+- **Shells nest under their owner.** Every live background shell renders as a rail line
+  (`<glyph> shell <status> <command…>   <elapsed>`) at the foot of the block of the agent
+  that launched it: the master's own shells below its components, and each subagent's
+  shells below its activity line. A shell launched *inside* a subagent is recorded only in
+  that subagent's transcript (not the master's), so it is parsed from there and attributed
+  to the subagent — Claude Code's footer counts these too, which is why a master with one
+  busy TDD subagent can show "9 shells" while none were launched at the master level.
 
 Master (the gauge + `62%` is red, `master` is orange):
 ```
@@ -126,12 +167,13 @@ master                    260.5k  [██████░░░░] 62%
 - Conversation             27.4k
 ```
 
-Subagent (`Explore` is teal):
+Subagent (`subagent` and the `>` are teal; the activity is dim, `idle 2s` dim):
 ```
-Explore · map all source files   9.2k   1%
+subagent · map all source files                    9.2k   1m 4s
 "Read every file under /Users/you/project/src AND /Users/you/project/test fully.
 For each file produce a detailed paragraph: its responsibility, every exported
 symbol, and how it connects to…"  0.1k
+> Read /Users/you/project/src/parser/index.ts.            idle 2s
 ```
 
 ---
@@ -160,12 +202,28 @@ symbol, and how it connects to…"  0.1k
   <id>. Output is being written to: <…/tasks/<id>.output>.` — both the id and the output
   path are captured (the path feeds the render-time liveness check).
 
-**OS (render time):** a background shell's `tasks/<id>.output` file, held open by the shell
-process for its lifetime; `lsof` on it confirms liveness (see §7, UI-kill handling).
-
 **`subagentStatusLine` stdin:**
 - `tasks[]`, each with `id`, `type`, `status`, `description`, `label`, `startTime`,
-  `tokenCount`, `tokenSamples`, `cwd`. No transcript path.
+  `tokenCount`, `tokenSamples`, `cwd`. No transcript path. For a *running* task,
+  `tokenCount` is `0`, `tokenSamples` is all-zero, and `type` is `local_agent` — none of it
+  changes tick-to-tick. The live signals come from the subagent transcript instead.
+
+**Subagent transcript** (`<master-dir>/<session>/subagents/agent-<taskId>.jsonl` +
+`agent-<taskId>.meta.json`): the per-subagent conversation, path derived from the master
+`transcript_path` + task `id`. Only the tail (~64 KiB) is read per tick.
+- Last assistant `message.usage` → the real running **total**.
+- Last meaningful `message.content` block → the **activity** line.
+- `meta.json` `agentType` → the real **type**.
+- File **mtime** → **idle** (last sign of life) and the pulse step (§3).
+- Background-shell launch echoes → the shells the subagent itself spawned. Every entry in
+  a subagent transcript is `isSidechain: true`, so (unlike the master parse) the sidechain
+  filter is NOT applied when extracting these — otherwise all of them would be dropped. The
+  whole file is read for this (a shell launched early can still be running), with the same
+  mtime+size cache as the master parse. Liveness is the same OS check as master shells (§7).
+
+**OS (render time):** a background shell's `tasks/<id>.output` file (held open by the shell
+for its lifetime; `lsof` confirms liveness — see §7, UI-kill handling) and each running
+subagent's `agent-<taskId>.jsonl` mtime, both stat'd per tick for liveness.
 
 ---
 

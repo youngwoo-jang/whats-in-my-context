@@ -17,9 +17,11 @@ export interface AgentHandoff {
 }
 
 /**
- * A background shell (a `Bash` tool_use with run_in_background:true), reconstructed
- * from the transcript: the launch ID + command, and a lifecycle status updated by
- * the completion notification / KillShell. Live shells render below the subagents.
+ * A background shell, reconstructed from a transcript: the launch ID + command, and a
+ * lifecycle status updated by the completion notification / KillShell. Keyed off the
+ * harness launch echo (not the `run_in_background` input flag — the harness also
+ * auto-backgrounds long/high-output commands). Live shells render as a left-rail group
+ * at the foot of the block of the agent that launched them (master or subagent).
  */
 export interface ShellRecord {
   /** harness shell id, e.g. "b0qw539vz" (from the launch tool_result). */

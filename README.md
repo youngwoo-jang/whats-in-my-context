@@ -12,9 +12,10 @@ master                    260.5k  [██████░░░░] 62%
 - Tools                    54.1k   Bash 19.7k | Web 0.0k | File 34.4k
 - Conversation             27.4k
 
-Explore · map all source files   9.2k   1%
+subagent · map all source files                    9.2k   1m 4s
 "Read every file under src and test fully. For each file produce a detailed
 paragraph: its responsibility, every exported symbol…"  0.1k
+> Read src/parser/index.ts.                               idle 2s
 ```
 
 - The number by each agent is its **exact total context** (from usage).
@@ -28,8 +29,12 @@ paragraph: its responsibility, every exported symbol…"  0.1k
   - **Conversation** — your prompts, the assistant's text, and sub-agent handoffs.
 - The trailing **fuel gauge + %** is the fill of the context window, colored
   **yellow ≥ 40%** and **red ≥ 60%** (degradation soft-starts ~40%, compact-by ~60%).
-- Each **subagent** shows its type · description, total, and the handoff it received
-  from the master (matched by description, capped at 200 chars).
+- Each **subagent** shows its type · description, total, elapsed, the handoff it received
+  from the master (matched by description, capped at 200 chars), and a live
+  `> activity … idle Ns` line. The total and activity come from the subagent's own
+  transcript (the harness reports `0` tokens while it runs); **idle** is time since it last
+  wrote anything — your hang signal — and the trailing dots advance only when it's actually
+  moving. The activity line is kept uniformly dim so it doesn't compete with the headers.
 
 It's fully **LLM-free**, deterministic, and **zero runtime dependencies** — everything
 is keyed on entry type, block type, and tool name. See

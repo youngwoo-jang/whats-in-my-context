@@ -1,9 +1,10 @@
-import { parseTranscriptCached } from "./cache";
+import { parseTranscriptCached, parseSubagentShellsCached } from "./cache";
 import { computeThinking, estimateTokens } from "../parser";
 import { AgentHandoff, ParseResult, ShellRecord } from "../parser/types";
 import { MasterView, ShellView, SubagentView, renderTree } from "./format";
 import { SubagentTask, readTasks } from "./dump";
 import { Liveness, probeShellLiveness } from "./liveness";
+import { SubagentLive, readSubagentLive, resolveDotPhases, subagentTranscriptPath } from "./subagent";
 
 /** Batched liveness probe (path[] → verdict map); injectable so tests don't shell out. */
 export type ShellLivenessProbe = (outputPaths: string[]) => Map<string, Liveness>;
@@ -23,8 +24,17 @@ const EMPTY: ParseResult = {
   skippedLines: 0,
 };
 
+/** Per-subagent live-signal lookup (taskId → its transcript-derived signals). */
+export type SubagentLiveLookup = (taskId: string) => SubagentLive;
+/** Dot-phase resolver (mtimes by taskId → phase 0..2 by taskId). */
+export type DotPhaseResolver = (mtimes: Map<string, number>) => Map<string, number>;
+/** Per-subagent background-shell lookup (taskId → its live shell rows); injectable for tests. */
+export type SubagentShellsLookup = (taskId: string) => ShellView[];
+
 export interface StatusInput {
   transcriptPath?: string;
+  /** session id, for the dot-phase pulse cache; falls back to the transcript name. */
+  sessionId?: string;
   windowSize: number;
   /** master total from statusLine `context_window.current_usage` (authoritative). */
   masterTotal?: { tokens: number; exact: boolean };
@@ -33,6 +43,12 @@ export interface StatusInput {
   now?: number;
   /** shell liveness probe; defaults to the real `lsof`-based one (injectable for tests). */
   isAlive?: ShellLivenessProbe;
+  /** per-subagent live signals; defaults to reading the subagent transcript (injectable). */
+  subagentLive?: SubagentLiveLookup;
+  /** dot-phase resolver; defaults to the tmp-backed pulse (injectable for tests). */
+  dotPhases?: DotPhaseResolver;
+  /** per-subagent background shells; defaults to parsing the subagent transcript (injectable). */
+  subagentShells?: SubagentShellsLookup;
 }
 
 /** ms elapsed since `startedAt`, or undefined if the spawn time is unknown/in the future. */
@@ -66,31 +82,36 @@ function capHandoff(text: string): string {
 export function buildSubagentView(
   t: SubagentTask,
   handoffByDesc: Map<string, AgentHandoff>,
-  now: number = Date.now()
+  now: number = Date.now(),
+  live: SubagentLive = {},
+  dotPhase?: number
 ): SubagentView {
   const description = (t.description || "").trim();
   const match = description ? handoffByDesc.get(description) : undefined;
 
-  // Real agent type comes from the matched Agent tool_use (subagentStatusLine only
-  // reports a generic "local_agent"); fall back to the task's own type.
-  const type = match?.subagentType || t.type || t.label || t.name || "agent";
+  // Real agent type: the subagent's own meta.json is authoritative (the matched master
+  // Agent tool_use is next; subagentStatusLine only reports a generic "local_agent").
+  const type = live.agentType || match?.subagentType || t.type || t.label || t.name || "agent";
 
   // Handoff is the matched master prompt (the description is already in the header).
   const handoff = match?.prompt
     ? { text: capHandoff(match.prompt), tokens: estimateTokens(match.prompt) }
     : undefined;
 
-  // tokenCount can arrive as 0 even while the agent is active; fall back to the
-  // largest tokenSample. If everything is 0, the harness has no count for this
-  // task (totalKnown=false → rendered as "—" rather than a misleading "0.0k").
+  // Token total: the subagent's own last `usage` is the real number — the harness reports
+  // tokenCount: 0 for the whole run. Fall back to tokenCount / the largest tokenSample.
+  // If everything is 0, there's no count (totalKnown=false → "—", not a misleading "0.0k").
   const samples = Array.isArray(t.tokenSamples)
     ? t.tokenSamples.filter((n): n is number => typeof n === "number")
     : [];
-  const total = Math.max(t.tokenCount || 0, ...(samples.length ? samples : [0]));
+  const total = Math.max(live.tokens || 0, t.tokenCount || 0, ...(samples.length ? samples : [0]));
 
   // Spawn time: the matched master `Agent` tool_use timestamp (reliable, from the
   // transcript), falling back to the harness task's own startTime if present.
   const ageMs = ageOf(match?.startedAt ?? t.startTime, now);
+
+  // Liveness: idle = time since the subagent's transcript was last written.
+  const idleMs = ageOf(live.mtimeMs, now);
 
   return {
     type,
@@ -99,6 +120,9 @@ export function buildSubagentView(
     totalKnown: total > 0,
     handoff,
     ageMs,
+    lastActivity: live.lastActivity,
+    idleMs,
+    dotPhase,
   };
 }
 
@@ -160,7 +184,44 @@ export function buildStatusLine(input: StatusInput, color = false): string {
   for (const h of parsed.agentHandoffs) {
     if (h.description) handoffByDesc.set(h.description, h);
   }
-  const subs = input.tasks.map((t) => buildSubagentView(t, handoffByDesc, now));
+
+  // Live signals from each subagent's own transcript (real tokens / type / last activity /
+  // mtime) — the stdin task carries none of these while running.
+  const liveLookup: SubagentLiveLookup =
+    input.subagentLive ??
+    ((id) => (input.transcriptPath ? readSubagentLive(input.transcriptPath, id) : {}));
+  const liveByTask = new Map<string, SubagentLive>();
+  for (const t of input.tasks) if (t.id) liveByTask.set(t.id, liveLookup(t.id));
+
+  // Advance the "Running..." dots by one step for each subagent whose transcript grew.
+  const mtimes = new Map<string, number>();
+  for (const t of input.tasks) {
+    const m = t.id ? liveByTask.get(t.id)?.mtimeMs : undefined;
+    if (t.id && typeof m === "number") mtimes.set(t.id, m);
+  }
+  const sessionId = input.sessionId || "default";
+  const phaseResolver: DotPhaseResolver = input.dotPhases ?? ((mt) => resolveDotPhases(sessionId, mt, now));
+  const phases = phaseResolver(mtimes);
+
+  // Each subagent's own background shells: parsed from ITS transcript (the master records
+  // none of them), then run through the same liveness probe as the master's shells.
+  const shellsLookup: SubagentShellsLookup =
+    input.subagentShells ??
+    ((id) => {
+      if (!input.transcriptPath) return [];
+      try {
+        const sub = parseSubagentShellsCached(subagentTranscriptPath(input.transcriptPath, id));
+        return buildShellViews(sub.shells, now, sub.lastCompactAt, input.isAlive);
+      } catch {
+        return [];
+      }
+    });
+
+  const subs = input.tasks.map((t) => {
+    const view = buildSubagentView(t, handoffByDesc, now, t.id ? liveByTask.get(t.id) : undefined, t.id ? phases.get(t.id) : undefined);
+    view.shells = t.id ? shellsLookup(t.id) : [];
+    return view;
+  });
   const shells = buildShellViews(parsed.shells, now, parsed.lastCompactAt, input.isAlive);
 
   return renderTree(master, subs, shells, input.windowSize, color);
@@ -186,6 +247,7 @@ export function renderFromStatusJSON(data: any, color = true): string {
   return buildStatusLine(
     {
       transcriptPath: data && data.transcript_path,
+      sessionId,
       windowSize,
       masterTotal,
       tasks: readTasks(sessionId),

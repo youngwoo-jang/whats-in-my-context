@@ -235,6 +235,28 @@ export function parseTranscript(filePath: string): ParseResult {
   };
 }
 
+/**
+ * Background shells from a SUBAGENT transcript. Every entry there is `isSidechain: true`
+ * (the subagent conversation IS the sidechain), so the master's sidechain filter would
+ * drop them all — here we run `parseShells` over the RAW entries instead. We only need the
+ * shells (+ the last compact_boundary epoch for the staleness fallback); the master's
+ * token components are not derivable for a subagent and are not computed. The launch echoes
+ * carry the `tasks/<id>.output` paths, so render-time liveness works exactly as for the
+ * master's own shells.
+ */
+export function parseSubagentShells(filePath: string): { shells: ShellRecord[]; lastCompactAt?: number } {
+  const { entries } = readJsonl(filePath);
+  let boundary = -1;
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i];
+    if (e?.type === "system" && e?.subtype === "compact_boundary") boundary = i;
+  }
+  return {
+    shells: parseShells(entries),
+    lastCompactAt: boundary >= 0 ? entryEpoch(entries[boundary]) : undefined,
+  };
+}
+
 /** Thinking = residual of the total after the measured components (DESIGN.md §2). */
 export function computeThinking(
   total: number,

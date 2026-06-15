@@ -20,6 +20,14 @@ export interface SubagentView {
   handoff?: { text: string; tokens: number };
   /** ms since spawn, rendered as a live "1h 3m 50s" elapsed; omitted if unknown. */
   ageMs?: number;
+  /** the subagent's last activity line (from its own transcript); omitted if unknown. */
+  lastActivity?: string;
+  /** ms since its transcript was last written — "idle Ns"; omitted if unknown. */
+  idleMs?: number;
+  /** mtime-keyed dot phase 0..2 → 1..3 trailing "Running..." dots; defaults to 0. */
+  dotPhase?: number;
+  /** background shells this subagent launched (rendered as a left-rail group below it). */
+  shells?: ShellView[];
 }
 
 /** A live background shell row: colored id, status, elapsed since spawn, command. */
@@ -170,6 +178,32 @@ function wrapWords(text: string, width: number): string[] {
 /** Common display label for every subagent (replaces the per-agent type, e.g. "Explore"). */
 const SUBAGENT_LABEL = "subagent";
 
+/**
+ * The live "current output" line under a subagent: `> <last activity><dots>   idle Ns`.
+ * The `>` reads like a console prompt; the trailing dots (always padded to 3 cols so the
+ * idle column never jitters) cycle 1→2→3 as the agent advances (see resolveDotPhases),
+ * giving a "Running..." pulse. Returns null when there's no activity to show.
+ */
+function renderActivity(v: SubagentView, color: boolean): string | null {
+  const text = (v.lastActivity || "").replace(/\s+/g, " ").trim();
+  if (!text) return null;
+
+  const phase = Math.max(0, Math.min(2, v.dotPhase ?? 0));
+  const dots = ".".repeat(phase + 1).padEnd(3, " "); // fixed 3 cols → stable idle column
+  const idle = v.idleMs != null ? "idle " + formatDuration(v.idleMs) : "";
+  const prefix = "> ";
+  const gap = idle ? idle.length + TIMER_GAP : 0;
+  const avail = Math.max(12, WRAP_WIDTH - prefix.length - dots.length - gap);
+  const body = text.length > avail ? text.slice(0, avail) : text; // no "…": the dots imply more
+  const left = prefix + body + dots;
+  const pad = idle ? " ".repeat(Math.max(TIMER_GAP, WRAP_WIDTH - left.length - idle.length)) : "";
+
+  if (!color) return left + pad + idle;
+  // Kept deliberately quiet: the whole line is dim (no teal marker, no idle threshold
+  // colors) so it doesn't compete with the master/subagent headers for attention.
+  return DIM + left + pad + idle + RESET;
+}
+
 export function renderSubagent(v: SubagentView, _windowSize: number, color = false): string[] {
   // Subagents do NOT align their tokens to the master's component column, and show no
   // fill %. The right cluster — token count + elapsed timer — is grouped and
@@ -204,6 +238,11 @@ export function renderSubagent(v: SubagentView, _windowSize: number, color = fal
       lines.push(dim(s, color) + suffix);
     });
   }
+  // Live "current output" line below the handoff (header → handoff → activity).
+  const activity = renderActivity(v, color);
+  if (activity) lines.push(activity);
+  // Background shells this subagent launched, as a left-rail group at the block's foot.
+  for (const line of renderShells(v.shells ?? [], color)) lines.push(line);
   return lines;
 }
 
@@ -211,21 +250,33 @@ export function renderSubagent(v: SubagentView, _windowSize: number, color = fal
 const SHELL_LABEL = "shell";
 
 /**
- * Render the background-shells block: one line per shell,
- * `shell <status> <command…>      <elapsed>` — the label colored, the command truncated
- * to leave room, and the elapsed timer flush-right at WRAP_WIDTH (a tidy timer column).
+ * Render a group of background shells as a left-rail "container": one line per shell,
+ * `<rail> shell <status> <command…>      <elapsed>`. The rail glyph marks position in the
+ * group — `┌` first, `│` middle, `└` last (a lone shell uses `└`) — so the shells read as
+ * one block under their owner (master or a subagent) WITHOUT indentation: statusLine strips
+ * each line's leading whitespace, so the rail glyph itself (a visible char) is the left edge.
+ * The command is truncated to leave room and the elapsed timer is flush-right at WRAP_WIDTH.
+ * Empty in → no lines.
+ *
+ * Tradeoff: box-drawing rail glyphs are East-Asian "Ambiguous width" (2 cols in a CJK
+ * terminal), so there the timer column can drift by one. Accepted for the container look —
+ * the drift is leading (left of the text), never compounds, and Latin terminals are exact.
  */
 export function renderShells(shells: ShellView[], color = false): string[] {
-  return shells.map((s) => {
+  const n = shells.length;
+  return shells.map((s, i) => {
+    const glyph = n === 1 || i === n - 1 ? "└" : i === 0 ? "┌" : "│";
     const age = s.ageMs != null ? formatDuration(s.ageMs) : "";
-    const prefix = `${SHELL_LABEL} ${s.status} `;
+    const prefix = `${glyph} ${SHELL_LABEL} ${s.status} `;
     const cmd = capLine(s.command, Math.max(12, WRAP_WIDTH - prefix.length - (age ? age.length + TIMER_GAP : 0)));
     const left = prefix + cmd;
     // ≥TIMER_GAP space gap, then the timer right-aligned to WRAP_WIDTH.
     const pad = age ? " ".repeat(Math.max(TIMER_GAP, WRAP_WIDTH - left.length - age.length)) : "";
     if (!color) return left + pad + age;
+    // Rail glyph dim, `shell` label teal, status/command plain, timer dim.
     const timer = age ? DIM + age + RESET : "";
-    return TEAL + SHELL_LABEL + RESET + left.slice(SHELL_LABEL.length) + pad + timer;
+    const head = `${DIM}${glyph}${RESET} ${TEAL}${SHELL_LABEL}${RESET} ${s.status} `;
+    return head + cmd + pad + timer;
   });
 }
 
@@ -233,7 +284,11 @@ export function renderShells(shells: ShellView[], color = false): string[] {
 // line collapses; a lone zero-width space survives trimming yet renders blank.
 export const BLOCK_SEP = "\n​\n";
 
-/** Render the full tree: master block, then each subagent block, then live shells. */
+/**
+ * Render the full tree. Each agent owns its shells: the master's directly-launched
+ * shells render as a left-rail group at the foot of the master block (below the
+ * components), and each subagent's shells at the foot of its own block (renderSubagent).
+ */
 export function renderTree(
   master: MasterView,
   subagents: SubagentView[],
@@ -241,8 +296,9 @@ export function renderTree(
   windowSize: number,
   color = false
 ): string {
-  const blocks = [renderMaster(master, windowSize, color).join("\n")];
+  const masterLines = renderMaster(master, windowSize, color);
+  for (const line of renderShells(shells, color)) masterLines.push(line);
+  const blocks = [masterLines.join("\n")];
   for (const s of subagents) blocks.push(renderSubagent(s, windowSize, color).join("\n"));
-  if (shells.length) blocks.push(renderShells(shells, color).join("\n"));
   return blocks.join(BLOCK_SEP);
 }
