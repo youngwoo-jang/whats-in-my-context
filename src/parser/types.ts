@@ -29,6 +29,13 @@ export interface ShellRecord {
   status: string;
   /** epoch ms of the launch tool_result entry — the shell's spawn time, for elapsed. */
   startedAt?: number;
+  /**
+   * Absolute path of the harness `tasks/<id>.output` file from the launch echo. A live
+   * shell keeps this file open (stdout/stderr redirect), so whether a process still holds
+   * it open is a ground-truth liveness check — see `shellAliveByOutput`. This catches
+   * UI-kills, which leave no transcript signal.
+   */
+  outputPath?: string;
 }
 
 /**

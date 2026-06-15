@@ -122,15 +122,20 @@ test("parseTranscript: reconstructs background shells with lifecycle + spawn tim
   const byId = new Map(r.shells.map((s) => [s.id, s]));
 
   // Four real launches: three explicit run_in_background + one auto-backgrounded.
-  // The echoed "bSPOOF99" text (unknown tool_use_id) and the mid-body "bMIDDLE42"
-  // echo from a foreground `cat` (anchored regex) are both ignored.
+  // Three spoofs are rejected by the whole-string anchored regex: "bSPOOF99" (echo with a
+  // prefix), "bMIDDLE42" (echo mid-body in a `cat`), and "bGREPDUMP" (a foreground
+  // `grep` whose FIRST line is a valid echo but is followed by more lines — the real
+  // over-count bug: a clean start anchor alone would have wrongly accepted it).
   assert.equal(r.shells.length, 4);
-  assert.ok(!byId.has("bSPOOF99"), "echoed launch text (unknown tool_use_id) does not spoof a shell");
+  assert.ok(!byId.has("bSPOOF99"), "echoed launch text with a prefix does not spoof a shell");
   assert.ok(!byId.has("bMIDDLE42"), "mid-body launch echo in a foreground result does not spoof a shell");
+  assert.ok(!byId.has("bGREPDUMP"), "a multi-line dump starting with a valid echo does not spoof a shell");
 
   assert.equal(byId.get("b0qw539vz")?.command, "npm run dev");
   assert.equal(byId.get("b0qw539vz")?.status, "running");
   assert.equal(byId.get("b0qw539vz")?.startedAt, Date.parse("2026-06-15T04:00:01.000Z"));
+  // The `.output` path from the launch echo is captured for the render-time liveness check.
+  assert.equal(byId.get("b0qw539vz")?.outputPath, "/tmp/x/tasks/b0qw539vz.output");
 
   // Auto-backgrounded: no run_in_background input flag, but the harness echoed a
   // background launch on its tool_result, so it must be tracked as a shell.

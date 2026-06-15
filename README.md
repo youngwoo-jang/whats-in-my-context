@@ -84,6 +84,13 @@ Two scripts cooperate through a small file in your temp dir:
 - **Component sizes are estimates** (~4 chars/token); per-agent **totals are exact**
   (from usage). `Thinking` is a residual and reads as an upper bound.
 - **Subagent rows vanish ~15 s** after their last status tick (i.e. once they finish).
+- **Background shells** are dropped the moment they stop running — including those
+  **killed from the UI** (the X button), which leave no trace in the transcript. A live
+  shell keeps its `tasks/<id>.output` file open for writing, so the render checks (one
+  batched, cached `lsof` per tick) whether any process still holds it for write; if not,
+  the shell is dead and hidden. This stays correct for a quiet-but-live process (e.g. an
+  idle dev server) and ignores mere readers like `tail -f`. Requires `lsof` on `PATH`
+  (default on macOS/Linux); without it, shells are dropped only by the `/compact` fallback.
 - Some subagents report **no token count**; those show `—` instead of a misleading `0`.
 - Glyphs are width-1 ASCII (no box-drawing) so columns align in both Latin and CJK
   terminals.

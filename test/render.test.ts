@@ -11,6 +11,10 @@ const sample = path.join(FIX, "sample-session.jsonl");
 
 const HANDOFF = "Search the auth module and list every file touching sessions.";
 
+/** Liveness probe stub: every path undecidable (as if lsof were unavailable). */
+const allUnknown = (paths: string[]) =>
+  new Map<string, boolean | undefined>(paths.map((p) => [p, undefined]));
+
 test("formatTokens: compact k, one decimal", () => {
   assert.equal(formatTokens(142000), "142.0k");
   assert.equal(formatTokens(500), "0.5k");
@@ -69,10 +73,37 @@ test("buildShellViews: without a compact boundary, nothing is dropped for stalen
 test("buildStatusLine: hides shells stranded 'running' across a /compact (bug repro)", () => {
   const fix = path.join(FIX, "shells-stale.jsonl");
   const now = Date.parse("2026-06-15T04:50:00.000Z");
-  const out = buildStatusLine({ transcriptPath: fix, windowSize: 200000, tasks: [], now });
+  // liveness undecidable (as if lsof were unavailable) → exercises the compact-staleness fallback.
+  const out = buildStatusLine({ transcriptPath: fix, windowSize: 200000, tasks: [], now, isAlive: allUnknown });
   assert.ok(!out.includes("npx vitest --watch"), "pre-compact zombie shell hidden");
   assert.ok(!out.includes("until ! pgrep"), "pre-compact zombie shell hidden");
   assert.ok(out.includes("npm run dev"), "post-compact live shell still shown");
+});
+
+test("buildShellViews: drops a running shell whose output file no process holds (UI-kill repro)", () => {
+  const now = 1000_000;
+  // Both look identical in the transcript (running, no terminal event); only liveness differs.
+  const shells: ShellRecord[] = [
+    { id: "bkilled01", command: "npx vitest run", status: "running", startedAt: now - 60_000, outputPath: "/t/bkilled01.output" },
+    { id: "blive0002", command: "npm run dev", status: "running", startedAt: now - 60_000, outputPath: "/t/blive0002.output" },
+  ];
+  // killed one has no writer (false), live one does (true).
+  const isAlive = (paths: string[]) =>
+    new Map(paths.map((p) => [p, p === "/t/blive0002.output"]));
+  const views = buildShellViews(shells, now, undefined, isAlive);
+  assert.deepEqual(views.map((v) => v.id), ["blive0002"], "UI-killed shell dropped, live one kept");
+});
+
+test("buildShellViews: a live shell is kept even if launched before the last /compact", () => {
+  const now = 1000_000;
+  const compactAt = now - 100_000;
+  // Pre-compact → the staleness heuristic alone would drop it, but lsof proves it's alive.
+  const shells: ShellRecord[] = [
+    { id: "bprecompact", command: "npm run dev", status: "running", startedAt: compactAt - 50_000, outputPath: "/t/bprecompact.output" },
+  ];
+  const allAlive = (paths: string[]) => new Map(paths.map((p) => [p, true as boolean | undefined]));
+  assert.equal(buildShellViews(shells, now, compactAt, allAlive).length, 1, "liveness overrides staleness");
+  assert.equal(buildShellViews(shells, now, compactAt, allUnknown).length, 0, "fallback still drops it");
 });
 
 test("renderShells: 'shell <status> <command…>  <elapsed>', timer flush-right", () => {
@@ -223,7 +254,9 @@ test("buildStatusLine: master-only when no tasks", () => {
 test("buildStatusLine: appends a live-shells block below the subagents", () => {
   const shellsFix = path.join(FIX, "shells.jsonl");
   const now = Date.parse("2026-06-15T04:00:01.000Z") + 230_000; // 3m 50s after b0qw539vz launch
-  const out = buildStatusLine({ transcriptPath: shellsFix, windowSize: 200000, tasks: [], now });
+  // The fixture's output paths don't exist on disk; keep liveness undecidable so the
+  // transcript-derived status (running/completed/killed) is what's exercised here.
+  const out = buildStatusLine({ transcriptPath: shellsFix, windowSize: 200000, tasks: [], now, isAlive: allUnknown });
   const blocks = out.split(BLOCK_SEP);
   assert.equal(blocks.length, 2, "master block + shells block");
   assert.match(out, /^shell running npm run dev\s+3m 50s$/m, "running shell, timer flush-right");

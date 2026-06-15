@@ -3,6 +3,10 @@ import { computeThinking, estimateTokens } from "../parser";
 import { AgentHandoff, ParseResult, ShellRecord } from "../parser/types";
 import { MasterView, ShellView, SubagentView, renderTree } from "./format";
 import { SubagentTask, readTasks } from "./dump";
+import { Liveness, probeShellLiveness } from "./liveness";
+
+/** Batched liveness probe (path[] → verdict map); injectable so tests don't shell out. */
+export type ShellLivenessProbe = (outputPaths: string[]) => Map<string, Liveness>;
 
 const HANDOFF_CAP = 200;
 
@@ -27,6 +31,8 @@ export interface StatusInput {
   tasks: SubagentTask[];
   /** "now" for elapsed timers; defaults to Date.now() (injectable for tests). */
   now?: number;
+  /** shell liveness probe; defaults to the real `lsof`-based one (injectable for tests). */
+  isAlive?: ShellLivenessProbe;
 }
 
 /** ms elapsed since `startedAt`, or undefined if the spawn time is unknown/in the future. */
@@ -112,15 +118,35 @@ function isStaleShell(s: ShellRecord, lastCompactAt?: number): boolean {
   return s.startedAt < lastCompactAt;
 }
 
-/** Live running shells → views with elapsed timers (finished/killed/stale shells dropped). */
+/**
+ * Live running shells → views with elapsed timers (finished/killed/dead shells dropped).
+ *
+ * A shell killed from the Claude Code UI (the X button) leaves NO transcript signal — no
+ * `TaskStop`/`KillShell` and no `task-notification <status>` — so it would otherwise stay
+ * pinned `running` forever and over-count. We resolve this at the OS level: a live shell
+ * keeps its `tasks/<id>.output` file open, so `probeShellLiveness` (a single batched `lsof`,
+ * write-holders only) is ground truth and, unlike an mtime cutoff, stays correct for a
+ * quiet-but-live process. Liveness wins when it can decide; when it can't (`lsof` missing /
+ * timed out, or no captured path) we fall back to the `compact_boundary` staleness guard so
+ * behavior never regresses. See BUGREPORT-auto-background-shells.md.
+ */
 export function buildShellViews(
   shells: ShellRecord[],
   now: number = Date.now(),
-  lastCompactAt?: number
+  lastCompactAt?: number,
+  liveness: ShellLivenessProbe = probeShellLiveness
 ): ShellView[] {
-  return shells
-    .filter((s) => s.status === "running")
-    .filter((s) => !isStaleShell(s, lastCompactAt))
+  const running = shells.filter((s) => s.status === "running");
+  // One batched probe for all running shells with a known output path.
+  const paths = running.map((s) => s.outputPath).filter((p): p is string => !!p);
+  const verdict = paths.length ? liveness(paths) : new Map<string, Liveness>();
+  return running
+    .filter((s) => {
+      const alive = s.outputPath ? verdict.get(s.outputPath) : undefined;
+      if (alive === true) return true; // a process holds the output open for write → live
+      if (alive === false) return false; // lsof saw no writer → dead (UI-kill / crash / done)
+      return !isStaleShell(s, lastCompactAt); // undecidable → fall back to the compact guard
+    })
     .map((s) => ({ id: s.id, status: s.status, command: s.command, ageMs: ageOf(s.startedAt, now) }));
 }
 
@@ -135,7 +161,7 @@ export function buildStatusLine(input: StatusInput, color = false): string {
     if (h.description) handoffByDesc.set(h.description, h);
   }
   const subs = input.tasks.map((t) => buildSubagentView(t, handoffByDesc, now));
-  const shells = buildShellViews(parsed.shells, now, parsed.lastCompactAt);
+  const shells = buildShellViews(parsed.shells, now, parsed.lastCompactAt, input.isAlive);
 
   return renderTree(master, subs, shells, input.windowSize, color);
 }

@@ -14,12 +14,20 @@ function entryEpoch(e: any): number | undefined {
   return Number.isFinite(t) ? t : undefined;
 }
 
-// A background-shell launch tool_result begins with the harness echo of its id and
-// output path, e.g. "Command running in background with ID: b0qw539vz. Output is being
-// written to: …". Anchored to the start of the result text so that a foreground command
-// which merely *prints* this line (e.g. cat-ing a background output log) can't spoof a
-// shell — the authoritative signal is the harness launch message, not body text.
-const SHELL_START_RE = /^\s*Command running in background with ID:\s*(\S+?)\.\s+Output is being written to:/;
+// A real background-shell launch tool_result is EXACTLY the harness echo and nothing else,
+// e.g. "Command running in background with ID: b0qw539vz. Output is being written to:
+// /…/tasks/b0qw539vz.output. You will be notified when it completes. To check interim
+// output, use Read on that file path." (the "To check…" tail is optional across versions).
+//
+// The regex is anchored at BOTH ends (whole-string match) on purpose: anchoring only the
+// start let a foreground command whose *first output line* is this echo spoof a shell —
+// e.g. `grep "Command running…" some.jsonl` or `cat`-ing a transcript, whose result is the
+// echo line FOLLOWED BY more lines. Such a result fails the trailing `\s*$`, so it's
+// rejected. Group 1 = shell id, group 2 = the `.output` path (for the liveness check).
+// `(.+?\.output)` tolerates spaces in the path; `.` never spans the newline that a
+// multi-line dump would add, so a dump can't be captured as a single echo.
+const SHELL_START_RE =
+  /^\s*Command running in background with ID:\s*(\S+?)\.\s+Output is being written to:\s*(.+?\.output)\.\s+You will be notified when it completes\.(?:\s+To check interim output, use Read on that file path\.?)?\s*$/;
 
 /**
  * Reconstruct background shells from the transcript. A shell is a `Bash` tool_use
@@ -63,7 +71,14 @@ function parseShells(entries: any[]): ShellRecord[] {
         const command = cmdByToolUseId.get(b.tool_use_id);
         if (command === undefined) continue;
         const m = SHELL_START_RE.exec(resultTextOf(b.content));
-        if (m) shells.set(m[1], { id: m[1], command, status: "running", startedAt: entryEpoch(e) });
+        if (m)
+          shells.set(m[1], {
+            id: m[1],
+            command,
+            status: "running",
+            startedAt: entryEpoch(e),
+            outputPath: m[2],
+          });
       }
     } else if (e?.type === "attachment" || e?.type === "queue-operation") {
       // Completion/status arrives as a task-notification attachment or queue-operation;

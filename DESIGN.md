@@ -156,6 +156,12 @@ symbol, and how it connects to…"  0.1k
 - Per-block token counts are not stored, so Tools / Conversation are estimated.
 - A compact writes a `{ type: "system", subtype: "compact_boundary" }` entry followed by
   a `{ isCompactSummary: true }` user turn holding the summary text.
+- A background-shell launch tool_result begins `Command running in background with ID:
+  <id>. Output is being written to: <…/tasks/<id>.output>.` — both the id and the output
+  path are captured (the path feeds the render-time liveness check).
+
+**OS (render time):** a background shell's `tasks/<id>.output` file, held open by the shell
+process for its lifetime; `lsof` on it confirms liveness (see §7, UI-kill handling).
 
 **`subagentStatusLine` stdin:**
 - `tasks[]`, each with `id`, `type`, `status`, `description`, `label`, `startTime`,
@@ -192,6 +198,23 @@ Public npm, standalone **npx one-shot installer** (not a plugin).
 - In compact limbo (a `compact_boundary` with no assistant usage after it), the stale
   pre-compact last-usage is not used as total; total is estimated from the active segment
   and marked non-exact (`?`) until the first post-compact turn issues a real usage.
+- A background shell **killed from the UI** (the X button) emits no transcript signal —
+  no `TaskStop`/`KillShell`, no `task-notification <status>` — so transcript parsing alone
+  would pin it `running` forever and over-count. Liveness is therefore confirmed at the OS
+  level: the harness redirects a shell's stdout/stderr to its `tasks/<id>.output` file for
+  the life of the process (the wrapping `zsh -c '…' > <id>.output` keeps the file open even
+  when the inner command redirects its own output), so a `running` shell is dropped unless
+  some process holds that file open **for write**. The path is captured from the launch
+  echo; a single batched `lsof -Fan` per render decides all running shells at once, and
+  verdicts are cached (~2 s TTL) so back-to-back renders don't re-spawn it. Requiring a
+  *write* holder (not just any) means a mere reader — `tail -f` on the output, an editor —
+  doesn't read as alive, while an inherited writer (a worker child of the shell) correctly
+  does. Unlike an mtime cutoff this stays correct for a *quiet but live* process (a dev
+  server, `vitest` between files), whose write fd is still open with no recent writes. The
+  probe is fail-safe: if `lsof` is missing or times out it returns "unknown" and the shell
+  falls back to the `compact_boundary` staleness guard (drop if launched before the last
+  `/compact`) rather than being hidden on a false reading. See
+  `BUGREPORT-auto-background-shells.md`.
 - Unknown window size → no danger icon.
 - Malformed transcript lines are skipped and counted.
 - No handoff match for a subagent → show its `description`.
