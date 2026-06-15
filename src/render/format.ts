@@ -167,6 +167,9 @@ function wrapWords(text: string, width: number): string[] {
  * colored), then the handoff quote word-wrapped to WRAP_WIDTH, then a
  * `- handoff <size>` row. No `>` marker (DESIGN.md §4).
  */
+/** Common display label for every subagent (replaces the per-agent type, e.g. "Explore"). */
+const SUBAGENT_LABEL = "subagent";
+
 export function renderSubagent(v: SubagentView, _windowSize: number, color = false): string[] {
   // Subagents do NOT align their tokens to the master's component column, and show no
   // fill %. The right cluster — token count + elapsed timer — is grouped and
@@ -177,7 +180,7 @@ export function renderSubagent(v: SubagentView, _windowSize: number, color = fal
   const agePlain = v.ageMs != null ? sep + formatDuration(v.ageMs) : "";
   const clusterPlain = total + agePlain;
 
-  const label = v.description ? `${v.type} · ${v.description}` : v.type;
+  const label = v.description ? `${SUBAGENT_LABEL} · ${v.description}` : SUBAGENT_LABEL;
   const pad = " ".repeat(Math.max(TIMER_GAP, WRAP_WIDTH - label.length - clusterPlain.length));
 
   let head: string;
@@ -185,7 +188,7 @@ export function renderSubagent(v: SubagentView, _windowSize: number, color = fal
     head = label + pad + clusterPlain;
   } else {
     const ageColored = v.ageMs != null ? sep + DIM + formatDuration(v.ageMs) + RESET : "";
-    const labelColored = TEAL + v.type + RESET + label.slice(v.type.length);
+    const labelColored = TEAL + SUBAGENT_LABEL + RESET + label.slice(SUBAGENT_LABEL.length);
     head = labelColored + pad + total + ageColored;
   }
 
@@ -204,22 +207,25 @@ export function renderSubagent(v: SubagentView, _windowSize: number, color = fal
   return lines;
 }
 
+/** Common display label for every background shell (replaces the per-shell id). */
+const SHELL_LABEL = "shell";
+
 /**
  * Render the background-shells block: one line per shell,
- * `<id> <status> <command…>      <elapsed>` — the id colored, the command truncated
+ * `shell <status> <command…>      <elapsed>` — the label colored, the command truncated
  * to leave room, and the elapsed timer flush-right at WRAP_WIDTH (a tidy timer column).
  */
 export function renderShells(shells: ShellView[], color = false): string[] {
   return shells.map((s) => {
     const age = s.ageMs != null ? formatDuration(s.ageMs) : "";
-    const prefix = `${s.id} ${s.status} `;
+    const prefix = `${SHELL_LABEL} ${s.status} `;
     const cmd = capLine(s.command, Math.max(12, WRAP_WIDTH - prefix.length - (age ? age.length + TIMER_GAP : 0)));
     const left = prefix + cmd;
     // ≥TIMER_GAP space gap, then the timer right-aligned to WRAP_WIDTH.
     const pad = age ? " ".repeat(Math.max(TIMER_GAP, WRAP_WIDTH - left.length - age.length)) : "";
     if (!color) return left + pad + age;
     const timer = age ? DIM + age + RESET : "";
-    return TEAL + s.id + RESET + left.slice(s.id.length) + pad + timer;
+    return TEAL + SHELL_LABEL + RESET + left.slice(SHELL_LABEL.length) + pad + timer;
   });
 }
 

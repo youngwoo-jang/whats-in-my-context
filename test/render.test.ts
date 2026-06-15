@@ -70,12 +70,12 @@ test("buildStatusLine: hides shells stranded 'running' across a /compact (bug re
   const fix = path.join(FIX, "shells-stale.jsonl");
   const now = Date.parse("2026-06-15T04:50:00.000Z");
   const out = buildStatusLine({ transcriptPath: fix, windowSize: 200000, tasks: [], now });
-  assert.ok(!out.includes("b71gyizwc"), "pre-compact zombie shell hidden");
-  assert.ok(!out.includes("be7ken7ie"), "pre-compact zombie shell hidden");
-  assert.ok(out.includes("bfreshpost"), "post-compact live shell still shown");
+  assert.ok(!out.includes("npx vitest --watch"), "pre-compact zombie shell hidden");
+  assert.ok(!out.includes("until ! pgrep"), "pre-compact zombie shell hidden");
+  assert.ok(out.includes("npm run dev"), "post-compact live shell still shown");
 });
 
-test("renderShells: '<id> <status> <command…>  <elapsed>', timer flush-right", () => {
+test("renderShells: 'shell <status> <command…>  <elapsed>', timer flush-right", () => {
   const long = "for i in $(seq 1 999); do echo a-very-long-command-that-overflows-the-line $i; done";
   const lines = renderShells(
     [
@@ -85,10 +85,10 @@ test("renderShells: '<id> <status> <command…>  <elapsed>', timer flush-right",
     false
   );
   assert.equal(lines.length, 2);
-  assert.ok(lines[0].startsWith("b0qw539vz running npm run dev"), "id status command");
+  assert.ok(lines[0].startsWith("shell running npm run dev"), "label status command");
   assert.ok(lines[0].endsWith("3m 50s"), "elapsed at the right end");
   assert.equal(lines[0].length, 80, "timer right-aligned to wrap width");
-  assert.ok(lines[1].startsWith("beelv3a64 running "));
+  assert.ok(lines[1].startsWith("shell running "));
   assert.ok(lines[1].includes("…"), "long command truncated");
   assert.ok(lines[1].endsWith("9s"), "elapsed still at the right end");
   assert.equal(lines[1].length, 80, "stays within wrap width");
@@ -208,7 +208,7 @@ test("buildStatusLine: end-to-end master + subagent with matched handoff", () =>
   assert.match(out, /^- System/m);
   assert.match(out, /^- Thinking/m);
   assert.match(out, /^- Tools/m);
-  assert.match(out, /^Explore · find auth/m); // type resolved from matched Agent, no ">" marker
+  assert.match(out, /^subagent · find auth/m); // common label, description preserved
   assert.ok(out.includes("Search the auth module"), "shows matched handoff quote");
   assert.ok(/Search the auth module.*\bsessions\.?"\s+\d+\.\d+k/s.test(out), "handoff size appended at quote end");
   assert.equal(out.split(BLOCK_SEP).length, 2);
@@ -226,8 +226,8 @@ test("buildStatusLine: appends a live-shells block below the subagents", () => {
   const out = buildStatusLine({ transcriptPath: shellsFix, windowSize: 200000, tasks: [], now });
   const blocks = out.split(BLOCK_SEP);
   assert.equal(blocks.length, 2, "master block + shells block");
-  assert.match(out, /^b0qw539vz running npm run dev\s+3m 50s$/m, "running shell, timer flush-right");
-  assert.ok(!out.includes("bdonewz9q"), "completed shell hidden");
-  assert.ok(!out.includes("beelv3a64"), "killed shell hidden");
+  assert.match(out, /^shell running npm run dev\s+3m 50s$/m, "running shell, timer flush-right");
+  assert.ok(!out.includes("sleep 2"), "completed shell hidden");
+  assert.ok(!out.includes("for i in 1 2 3"), "killed shell hidden");
   assert.ok(!out.includes("bSPOOF99"), "echoed launch text not shown");
 });
