@@ -121,13 +121,21 @@ test("parseTranscript: reconstructs background shells with lifecycle + spawn tim
   const r = parseTranscript(path.join(FIX, "shells.jsonl"));
   const byId = new Map(r.shells.map((s) => [s.id, s]));
 
-  // Three real launches; the echoed "bSPOOF99" text (unknown tool_use_id) is ignored.
-  assert.equal(r.shells.length, 3);
-  assert.ok(!byId.has("bSPOOF99"), "echoed launch text does not spoof a shell");
+  // Four real launches: three explicit run_in_background + one auto-backgrounded.
+  // The echoed "bSPOOF99" text (unknown tool_use_id) and the mid-body "bMIDDLE42"
+  // echo from a foreground `cat` (anchored regex) are both ignored.
+  assert.equal(r.shells.length, 4);
+  assert.ok(!byId.has("bSPOOF99"), "echoed launch text (unknown tool_use_id) does not spoof a shell");
+  assert.ok(!byId.has("bMIDDLE42"), "mid-body launch echo in a foreground result does not spoof a shell");
 
   assert.equal(byId.get("b0qw539vz")?.command, "npm run dev");
   assert.equal(byId.get("b0qw539vz")?.status, "running");
   assert.equal(byId.get("b0qw539vz")?.startedAt, Date.parse("2026-06-15T04:00:01.000Z"));
+
+  // Auto-backgrounded: no run_in_background input flag, but the harness echoed a
+  // background launch on its tool_result, so it must be tracked as a shell.
+  assert.equal(byId.get("bautobg77")?.command, "npx vitest run test/foo.test.ts");
+  assert.equal(byId.get("bautobg77")?.status, "running");
 
   assert.equal(byId.get("bdonewz9q")?.status, "completed", "task-notification flips status");
   assert.equal(byId.get("beelv3a64")?.status, "killed", "TaskStop/KillShell marks killed");

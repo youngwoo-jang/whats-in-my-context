@@ -14,21 +14,28 @@ function entryEpoch(e: any): number | undefined {
   return Number.isFinite(t) ? t : undefined;
 }
 
-// A background-shell launch tool_result echoes its id and output path, e.g.
-// "Command running in background with ID: b0qw539vz. Output is being written to: …".
-const SHELL_START_RE = /running in background with ID:\s*(\S+?)\.\s+Output is being written to:/;
+// A background-shell launch tool_result begins with the harness echo of its id and
+// output path, e.g. "Command running in background with ID: b0qw539vz. Output is being
+// written to: …". Anchored to the start of the result text so that a foreground command
+// which merely *prints* this line (e.g. cat-ing a background output log) can't spoof a
+// shell — the authoritative signal is the harness launch message, not body text.
+const SHELL_START_RE = /^\s*Command running in background with ID:\s*(\S+?)\.\s+Output is being written to:/;
 
 /**
  * Reconstruct background shells from the transcript. A shell is a `Bash` tool_use
- * with run_in_background:true; its id + spawn time come from the
- * matching launch tool_result, and its status is updated by the completion
+ * whose launch tool_result begins with the harness background-launch echo (whether the
+ * command was explicitly run_in_background or auto-backgrounded by the harness); its id +
+ * spawn time come from that launch tool_result, and its status is updated by the completion
  * notification (task-notification attachment / queue-operation) or a kill.
  *
  * Runs over the whole (non-sidechain) file, not just the active post-compact segment,
  * because a shell can outlive a /compact and still be running.
  */
 function parseShells(entries: any[]): ShellRecord[] {
-  // run_in_background Bash launches, keyed by tool_use id → command.
+  // Every Bash launch, keyed by tool_use id → command. We register all of them (not
+  // just run_in_background:true) because the harness auto-backgrounds long-running or
+  // high-output commands without that input flag; whether a launch became a shell is
+  // decided by the anchored launch-echo match on its tool_result, not the input param.
   const cmdByToolUseId = new Map<string, string>();
   const shells = new Map<string, ShellRecord>();
 
@@ -38,8 +45,8 @@ function parseShells(entries: any[]): ShellRecord[] {
     if (e?.type === "assistant" && Array.isArray(content)) {
       for (const b of content) {
         if (b?.type !== "tool_use") continue;
-        if (b.name === "Bash" && b.input?.run_in_background === true && b.id) {
-          cmdByToolUseId.set(b.id, String(b.input.command ?? ""));
+        if (b.name === "Bash" && b.id) {
+          cmdByToolUseId.set(b.id, String(b.input?.command ?? ""));
         } else if (b.name === "KillShell" || b.name === "TaskStop") {
           // KillShell was renamed TaskStop; it carries shell_id (deprecated) or task_id.
           const id = b.input?.shell_id || b.input?.task_id;
